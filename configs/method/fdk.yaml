@@ -1,0 +1,6 @@
+name: fdk
+
+reconstruction:
+  algorithm: fdk
+
+max_steps: 1

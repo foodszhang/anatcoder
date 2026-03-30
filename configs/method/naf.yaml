@@ -1,0 +1,12 @@
+name: naf
+
+checkpoint: null
+optimizer:
+  lr: 1e-4
+  weight_decay: 0
+
+scheduler:
+  type: cosine
+  T_max: 50000
+
+max_steps: 50000

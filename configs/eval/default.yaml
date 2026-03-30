@@ -1,0 +1,12 @@
+metrics:
+  global: [psnr, ssim, mae]
+  organ_level: true
+
+organ_groups:
+  G1_high_contrast: [bone, lung_left, lung_right]
+  G2_mid_contrast: [liver, spleen, kidney_left, kidney_right]
+  G3_low_contrast: [pancreas, adrenal_gland_left, adrenal_gland_right]
+  G4_tubular: [aorta, portal_vein, trachea]
+  G5_boundary: []
+
+seg_mask_dir: data/processed

@@ -1,0 +1,10 @@
+defaults:
+  - method: vanilla_inr
+  - data: default
+  - trainer: default
+  - eval: default
+  - _self_
+
+seed: 42
+project_name: anatcoder
+exp_name: ${method.name}_${data.n_views}views

@@ -1,0 +1,47 @@
+name: anatcoder
+
+encoding:
+  type: hash_grid
+  n_levels: 16
+  n_features_per_level: 2
+  log2_hashmap_size: 19
+  base_resolution: 16
+  per_level_scale: 1.447
+
+backbone:
+  n_layers: 4
+  hidden_dim: 256
+  skip_connections: [2]
+
+anatomy:
+  atlas_path: data/atlas/atlas_prob_map.npy
+  n_classes: 104
+  embed_dim: 64
+  conditioning: concat   # concat 或 film
+
+dual_head:
+  attenuation_head_layers: 1
+  anatomy_head_layers: 1
+
+advr:
+  enabled: true
+
+loss:
+  lambda_anat: 0.1
+  lambda_region: 0.01
+  lambda_decomp: 0.05
+
+training_phases:
+  phase1_steps: 1000      # 只训 mu head + L_proj
+  phase2_steps: 2000      # 加 anatomy head + L_anat
+  # phase3: 剩余 steps, 全部 loss 联合
+
+optimizer:
+  lr: 5e-4
+  weight_decay: 0
+
+scheduler:
+  type: cosine
+  T_max: 50000
+
+max_steps: 50000
