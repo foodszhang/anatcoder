@@ -1,10 +1,10 @@
 defaults:
-  - method: vanilla_inr
+  - model: vanilla_inr
+  - train: default
   - data: default
-  - trainer: default
-  - eval: default
+  - optional experiment: null
   - _self_
 
 seed: 42
 project_name: anatcoder
-exp_name: ${method.name}_${data.n_views}views
+experiment_name: "${model.name}_${data.case}_${data.n_views}views"

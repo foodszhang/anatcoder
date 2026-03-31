@@ -1,0 +1,10 @@
+max_epochs: 63
+batch_size: 4096
+n_samples: 256
+lr_mlp: 5e-4
+lr_encoder: 1e-2
+lr_min: 1e-5
+val_every_n_epoch: 10
+chunk_size: 4096
+recon_chunk_size: 65536
+num_workers: 4
