@@ -1,0 +1,11 @@
+data_dir: data/processed
+proj_dir: data/projections
+case: case001
+n_views: 50
+volume_size: [128, 128, 128]
+voxel_size: [1.0, 1.0, 1.0]
+geo:
+  DSD: 1536
+  DSO: 1000
+  n_detector: [256, 256]
+  d_detector: [1.5, 1.5]

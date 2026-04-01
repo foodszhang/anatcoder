@@ -1,0 +1,14 @@
+volume_size: 128
+spacing: [1.0, 1.0, 1.0]
+hu_window: [-160, 240]
+n_views: 10
+n_samples_per_ray: 128
+batch_size: 2048
+data_dir: data/processed
+proj_dir: data/projections
+
+geo:
+  DSD: 1536
+  DSO: 1000
+  detector_size: [128, 128]
+  detector_spacing: [2.0, 2.0]

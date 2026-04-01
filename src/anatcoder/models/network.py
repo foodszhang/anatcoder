@@ -51,8 +51,12 @@ class VanillaINR(nn.Module):
             layers.append(nn.Linear(in_dim, hidden_dim))
             layers.append(nn.ReLU(inplace=True))
             in_dim = hidden_dim
-        layers.append(nn.Linear(hidden_dim, 1))
         self.mlp = nn.Sequential(*layers)
+        self.attenuation_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim // 2, 1),
+        )
         self.out_activation = nn.Softplus()
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
@@ -67,10 +71,10 @@ class VanillaINR(nn.Module):
         if coords.ndim != 2 or coords.shape[-1] != 3:
             raise ValueError(f'coords must be [N,3], got shape={tuple(coords.shape)}')
         encoded = self.encoder(coords)
-        mu = self.out_activation(self.mlp(encoded))
+        features = self.mlp(encoded)
+        mu = self.out_activation(self.attenuation_head(features))
         return mu
 
     def query_density(self, coords: torch.Tensor) -> torch.Tensor:
         """Alias of :meth:`forward` for semantic clarity in rendering code."""
         return self.forward(coords)
-

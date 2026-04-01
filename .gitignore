@@ -1,8 +1,8 @@
 # Data & outputs
-data/
-outputs/
-logs/
-wandb/
+/data/
+/outputs/
+/logs/
+/wandb/
 
 # Python
 __pycache__/

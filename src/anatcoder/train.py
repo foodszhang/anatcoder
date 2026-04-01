@@ -90,8 +90,10 @@ class CTReconLitModule(pl.LightningModule):
         loss = F.mse_loss(pred_pixels, gt_pixels)
         self._loss_history.append(float(loss.detach().cpu().item()))
 
-        if getattr(self, '_trainer', None) is not None:
-            self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=gt_pixels.shape[0])
+        # `self.trainer` raises before attachment; guard using internal reference first.
+        if self._trainer is not None and self.trainer is not None:
+            self.log('train/loss', loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=gt_pixels.shape[0])
+            self.log('train/loss_step', loss, on_step=True, on_epoch=False, prog_bar=False, batch_size=gt_pixels.shape[0])
             optimizer = self.optimizers(use_pl_optimizer=False)
             if optimizer is not None:
                 self.log(
@@ -144,7 +146,7 @@ class CTReconLitModule(pl.LightningModule):
     def configure_optimizers(self):
         """Configure Adam with encoder/MLP parameter groups and cosine schedule."""
         encoder_params = list(self.model.encoder.parameters())
-        mlp_params = list(self.model.mlp.parameters())
+        mlp_params = list(self.model.mlp.parameters()) + list(self.model.attenuation_head.parameters())
 
         optimizer = torch.optim.Adam(
             [
@@ -198,6 +200,8 @@ class CTReconLitModule(pl.LightningModule):
 @hydra.main(version_base=None, config_path='../../configs', config_name='config')
 def main(cfg: DictConfig) -> None:
     """Hydra-driven training entrypoint."""
+    pl.seed_everything(int(cfg.get('seed', 42)), workers=True)
+
     geo = CBCTGeometry(
         DSD=float(cfg.data.geo.DSD),
         DSO=float(cfg.data.geo.DSO),

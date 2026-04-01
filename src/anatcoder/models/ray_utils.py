@@ -10,6 +10,17 @@ import torch.nn.functional as F
 from anatcoder.utils.geometry import CBCTGeometry
 
 
+def _to_tigre_world(coords: torch.Tensor) -> torch.Tensor:
+    """Map internal coordinates to TIGRE-compatible world axes.
+
+    TIGRE's world frame for the Python volume convention can be matched by
+    reordering/signing axes as ``[x, -z, -y]``.
+    """
+    if coords.ndim != 2 or coords.shape[-1] != 3:
+        raise ValueError(f'coords must be [N,3], got shape={tuple(coords.shape)}')
+    return torch.stack((coords[:, 0], -coords[:, 2], -coords[:, 1]), dim=-1)
+
+
 def generate_rays_for_view(
     geo: CBCTGeometry,
     angle: float,
@@ -62,6 +73,8 @@ def generate_rays_for_view(
     )
     origins = source[None, None, :].expand(rows, cols, 3).reshape(-1, 3)
     directions = F.normalize((detector_points - source[None, None, :]).reshape(-1, 3), dim=-1)
+    origins = _to_tigre_world(origins)
+    directions = F.normalize(_to_tigre_world(directions), dim=-1)
     return origins.to(torch.float32), directions.to(torch.float32)
 
 
@@ -123,6 +136,8 @@ def generate_rays_batch(
     directions = F.normalize(detector_points - origins, dim=-1)
 
     flat_indices = angle_idx * (rows * cols) + row_idx * cols + col_idx
+    origins = _to_tigre_world(origins)
+    directions = F.normalize(_to_tigre_world(directions), dim=-1)
     return origins.to(torch.float32), directions.to(torch.float32), flat_indices.to(torch.long)
 
 
@@ -197,4 +212,3 @@ def normalize_coords(points: torch.Tensor, volume_size: list[float]) -> torch.Te
         raise ValueError(f'volume_size values must be positive, got {volume_size}')
 
     return points / size + 0.5
-
