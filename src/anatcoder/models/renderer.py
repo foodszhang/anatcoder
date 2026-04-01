@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from anatcoder.models.ray_utils import normalize_coords, sample_points_along_rays
+from anatcoder.models.ray_utils import _to_tigre_world, normalize_coords, sample_points_along_rays
 
 
 class VolumeRenderer(nn.Module):
@@ -127,7 +127,8 @@ def reconstruct_volume(
     y = (torch.arange(ny, device=device, dtype=torch.float32) + 0.5 - ny / 2.0) * dy
     x = (torch.arange(nx, device=device, dtype=torch.float32) + 0.5 - nx / 2.0) * dx
     zz, yy, xx = torch.meshgrid(z, y, x, indexing='ij')
-    world_points = torch.stack((zz, yy, xx), dim=-1).reshape(-1, 3)
+    world_points = torch.stack((xx, yy, zz), dim=-1).reshape(-1, 3)
+    world_points = _to_tigre_world(world_points)
 
     size_mm = [nz * dz, ny * dy, nx * dx]
     norm_points = normalize_coords(world_points, size_mm)
@@ -147,4 +148,3 @@ def reconstruct_volume(
 
     mu = torch.cat(preds, dim=0).reshape(nz, ny, nx)
     return mu.detach().cpu().numpy().astype(np.float32, copy=False)
-
