@@ -47,6 +47,7 @@ class CTProjectionDataset(Dataset[dict[str, torch.Tensor]]):
             raise FileNotFoundError(f'GT volume not found: {volume_path}')
 
         self.projections = np.asarray(load_numpy(proj_path), dtype=np.float32)
+        self.projections = np.ascontiguousarray(self.projections.transpose(0, 2, 1))
         self.angles = np.asarray(load_numpy(angle_path), dtype=np.float32)
         self.gt_volume = np.asarray(load_numpy(volume_path), dtype=np.float32)
         self.seg = np.asarray(load_numpy(seg_path), dtype=np.int16) if seg_path.exists() else None
