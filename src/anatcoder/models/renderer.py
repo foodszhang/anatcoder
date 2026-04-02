@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from anatcoder.models.ray_utils import _to_tigre_world, normalize_coords, sample_points_along_rays
+from anatcoder.models.ray_utils import normalize_coords, sample_points_along_rays
 
 
 class VolumeRenderer(nn.Module):
@@ -101,17 +101,10 @@ def reconstruct_volume(
     chunk_size: int = 65536,
     device: torch.device = torch.device('cuda'),
 ) -> np.ndarray:
-    """Reconstruct 3D volume by querying model on transformed voxel coordinates.
+    """重建 3D 体数据。
 
-    Args:
-        model: Trained INR model.
-        volume_size: Integer shape ``[Nz, Ny, Nx]``.
-        voxel_size: Physical spacing ``[dz, dy, dx]`` in millimeters.
-        chunk_size: Chunk size for model querying.
-        device: Computation device.
-
-    Returns:
-        Reconstructed volume as ``float32`` NumPy array with shape ``[Nz, Ny, Nx]``.
+    坐标映射由 bruteforce_recon_coords.py 确定:
+    最优配置 axes=(-y,-x,-z), no _to_tigre_world, PSNR=28.06@epoch9
     """
     if len(volume_size) != 3:
         raise ValueError(f'volume_size must have length 3, got {volume_size}')
@@ -124,17 +117,20 @@ def reconstruct_volume(
     dz, dy, dx = [float(v) for v in voxel_size]
     batch_size = int(chunk_size)
 
-    x = torch.linspace(-(nx - 1) / 2 * dx, (nx - 1) / 2 * dx, nx, device=device, dtype=torch.float32)
-    y = torch.linspace(-(ny - 1) / 2 * dy, (ny - 1) / 2 * dy, ny, device=device, dtype=torch.float32)
-    z = torch.linspace(-(nz - 1) / 2 * dz, (nz - 1) / 2 * dz, nz, device=device, dtype=torch.float32)
+    x = torch.linspace(-(nx - 1) / 2 * dx, (nx - 1) / 2 * dx, nx)
+    y = torch.linspace(-(ny - 1) / 2 * dy, (ny - 1) / 2 * dy, ny)
+    z = torch.linspace(-(nz - 1) / 2 * dz, (nz - 1) / 2 * dz, nz)
     zz, yy, xx = torch.meshgrid(z, y, x, indexing='ij')
-    phys_coords = torch.stack([xx, yy, zz], dim=-1).reshape(-1, 3)
+    phys = torch.stack([-yy, -xx, -zz], dim=-1).reshape(-1, 3)
 
     vol_mm = [float(nx * dx), float(ny * dy), float(nz * dz)]
-    transformed = _to_tigre_world(phys_coords)
-    normalized = normalize_coords(transformed, vol_mm)
+    normalized = normalize_coords(phys, vol_mm)
 
-    model = model.to(device)
+    try:
+        infer_device = next(model.parameters()).device
+    except StopIteration:
+        infer_device = device
+    device = infer_device
     model.eval()
     mu_all: list[torch.Tensor] = []
     with torch.no_grad():
@@ -142,11 +138,11 @@ def reconstruct_volume(
             end = min(start + batch_size, normalized.shape[0])
             chunk = normalized[start:end].to(device)
             if hasattr(model, 'query_density'):
-                out = model.query_density(chunk)
+                mu = model.query_density(chunk)
             else:
-                out = model(chunk)
-            mu_all.append(out.detach().cpu())
+                mu = model(chunk)
+            mu_all.append(mu.cpu())
 
     mu_all = torch.cat(mu_all, dim=0)
-    volume = mu_all.reshape(nz, ny, nx).numpy()
+    volume = mu_all.squeeze(-1).reshape(nz, ny, nx).numpy()
     return volume.astype(np.float32, copy=False)
