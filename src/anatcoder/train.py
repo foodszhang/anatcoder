@@ -233,7 +233,7 @@ def main(cfg: DictConfig) -> None:
         max_epochs=int(cfg.train.max_epochs),
         accelerator=accelerator,
         devices=1,
-        precision='32-true',
+        precision=str(getattr(cfg.train, 'precision', '32-true')),
         callbacks=callbacks,
         check_val_every_n_epoch=int(cfg.train.val_every_n_epoch),
         logger=pl_loggers.TensorBoardLogger('logs/', name=str(cfg.experiment_name)),
