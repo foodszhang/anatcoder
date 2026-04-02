@@ -101,7 +101,7 @@ def reconstruct_volume(
     chunk_size: int = 65536,
     device: torch.device = torch.device('cuda'),
 ) -> np.ndarray:
-    """Query model density on full voxel grid and reconstruct 3D volume.
+    """Reconstruct 3D volume by querying model on transformed voxel coordinates.
 
     Args:
         model: Trained INR model.
@@ -122,29 +122,31 @@ def reconstruct_volume(
 
     nz, ny, nx = [int(v) for v in volume_size]
     dz, dy, dx = [float(v) for v in voxel_size]
+    batch_size = int(chunk_size)
 
-    z = (torch.arange(nz, device=device, dtype=torch.float32) + 0.5 - nz / 2.0) * dz
-    y = (torch.arange(ny, device=device, dtype=torch.float32) + 0.5 - ny / 2.0) * dy
-    x = (torch.arange(nx, device=device, dtype=torch.float32) + 0.5 - nx / 2.0) * dx
+    x = torch.linspace(-(nx - 1) / 2 * dx, (nx - 1) / 2 * dx, nx, device=device, dtype=torch.float32)
+    y = torch.linspace(-(ny - 1) / 2 * dy, (ny - 1) / 2 * dy, ny, device=device, dtype=torch.float32)
+    z = torch.linspace(-(nz - 1) / 2 * dz, (nz - 1) / 2 * dz, nz, device=device, dtype=torch.float32)
     zz, yy, xx = torch.meshgrid(z, y, x, indexing='ij')
-    world_points = torch.stack((xx, yy, zz), dim=-1).reshape(-1, 3)
-    world_points = _to_tigre_world(world_points)
+    phys_coords = torch.stack([xx, yy, zz], dim=-1).reshape(-1, 3)
 
-    size_mm = [nz * dz, ny * dy, nx * dx]
-    norm_points = normalize_coords(world_points, size_mm)
+    vol_mm = [float(nx * dx), float(ny * dy), float(nz * dz)]
+    transformed = _to_tigre_world(phys_coords)
+    normalized = normalize_coords(transformed, vol_mm)
 
     model = model.to(device)
     model.eval()
-    preds: list[torch.Tensor] = []
+    mu_all: list[torch.Tensor] = []
     with torch.no_grad():
-        for start in range(0, norm_points.shape[0], chunk_size):
-            end = min(start + chunk_size, norm_points.shape[0])
-            query = norm_points[start:end]
+        for start in range(0, normalized.shape[0], batch_size):
+            end = min(start + batch_size, normalized.shape[0])
+            chunk = normalized[start:end].to(device)
             if hasattr(model, 'query_density'):
-                out = model.query_density(query)
+                out = model.query_density(chunk)
             else:
-                out = model(query)
-            preds.append(out)
+                out = model(chunk)
+            mu_all.append(out.detach().cpu())
 
-    mu = torch.cat(preds, dim=0).reshape(nz, ny, nx)
-    return mu.detach().cpu().numpy().astype(np.float32, copy=False)
+    mu_all = torch.cat(mu_all, dim=0)
+    volume = mu_all.reshape(nz, ny, nx).numpy()
+    return volume.astype(np.float32, copy=False)
