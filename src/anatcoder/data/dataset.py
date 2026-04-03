@@ -47,7 +47,9 @@ class CTProjectionDataset(Dataset[dict[str, torch.Tensor]]):
             raise FileNotFoundError(f'GT volume not found: {volume_path}')
 
         self.projections = np.asarray(load_numpy(proj_path), dtype=np.float32)
-        self.projections = np.ascontiguousarray(self.projections.transpose(0, 2, 1))
+        # Keep projections in native [K, rows, cols]. Rays are flattened row-major
+        # (r * cols + c), while pixel pairing validated against TIGRE needs each view
+        # flattened in Fortran order so gt index aligns with generated ray index.
         self.angles = np.asarray(load_numpy(angle_path), dtype=np.float32)
         self.gt_volume = np.asarray(load_numpy(volume_path), dtype=np.float32)
         self.seg = np.asarray(load_numpy(seg_path), dtype=np.int16) if seg_path.exists() else None
@@ -80,7 +82,10 @@ class CTProjectionDataset(Dataset[dict[str, torch.Tensor]]):
             ray_directions.append(dirs_t.numpy())
         self._ray_origins = np.stack(ray_origins, axis=0).reshape(-1, 3).astype(np.float32, copy=False)
         self._ray_directions = np.stack(ray_directions, axis=0).reshape(-1, 3).astype(np.float32, copy=False)
-        self._gt_pixels = self.projections.reshape(-1).astype(np.float32, copy=False)
+        gt_views: list[np.ndarray] = []
+        for k in range(self.n_view_loaded):
+            gt_views.append(self.projections[k].flatten(order='F'))
+        self._gt_pixels = np.concatenate(gt_views).astype(np.float32, copy=False)
 
     def __len__(self) -> int:
         """Return total number of rays: ``K * detector_rows * detector_cols``."""
