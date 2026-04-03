@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import torch
 import torch.nn as nn
 
@@ -21,6 +23,8 @@ class VanillaINR(nn.Module):
         per_level_scale: float = 1.4472,
         n_hidden_layers: int = 4,
         hidden_dim: int = 256,
+        skips: Sequence[int] | None = None,
+        last_activation: str = 'softplus',
     ) -> None:
         """Initialize encoder and MLP backbone."""
         super().__init__()
@@ -45,19 +49,37 @@ class VanillaINR(nn.Module):
         else:
             raise ValueError(f'Unsupported encoder_type: {encoder_type}')
 
-        layers: list[nn.Module] = []
-        in_dim = self.encoder.output_dim
-        for _ in range(n_hidden_layers):
-            layers.append(nn.Linear(in_dim, hidden_dim))
-            layers.append(nn.ReLU(inplace=True))
-            in_dim = hidden_dim
-        self.mlp = nn.Sequential(*layers)
+        self._encoder_dim = int(self.encoder.output_dim)
+        self._hidden_dim = int(hidden_dim)
+        self._skips = set(int(i) for i in skips) if skips is not None else set()
+        invalid_skips = [i for i in self._skips if i < 0 or i >= n_hidden_layers]
+        if invalid_skips:
+            raise ValueError(f'skip indices out of range: {invalid_skips}, n_hidden_layers={n_hidden_layers}')
+
+        self._mlp_layers = nn.ModuleList()
+        for i in range(n_hidden_layers):
+            if i == 0:
+                in_dim = self._encoder_dim
+            else:
+                in_dim = self._hidden_dim
+            if i in self._skips:
+                in_dim += self._encoder_dim
+            self._mlp_layers.append(nn.Linear(in_dim, self._hidden_dim))
+
+        # Keep backward-compatible attribute name used elsewhere in training code.
+        self.mlp = self._mlp_layers
         self.attenuation_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim // 2, 1),
         )
-        self.out_activation = nn.Softplus()
+        act = str(last_activation).lower()
+        if act == 'sigmoid':
+            self.out_activation = nn.Sigmoid()
+        elif act == 'softplus':
+            self.out_activation = nn.Softplus()
+        else:
+            raise ValueError(f'Unsupported last_activation: {last_activation}')
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
         """Predict attenuation coefficients for normalized coordinates.
@@ -72,10 +94,15 @@ class VanillaINR(nn.Module):
             raise ValueError(f'coords must be [N,3], got shape={tuple(coords.shape)}')
         encoded = self.encoder(coords)
         # tinycudann hash-grid can emit fp16 features on CUDA; align with MLP weights.
-        target_dtype = self.mlp[0].weight.dtype
+        target_dtype = self._mlp_layers[0].weight.dtype
         if encoded.dtype != target_dtype:
             encoded = encoded.to(dtype=target_dtype)
-        features = self.mlp(encoded)
+        h = encoded
+        for i, layer in enumerate(self._mlp_layers):
+            if i in self._skips:
+                h = torch.cat([h, encoded], dim=-1)
+            h = torch.relu(layer(h))
+        features = h
         mu = self.out_activation(self.attenuation_head(features))
         return mu
 

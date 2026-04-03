@@ -42,6 +42,8 @@ class CTReconLitModule(pl.LightningModule):
             per_level_scale=float(cfg.model.per_level_scale),
             n_hidden_layers=int(cfg.model.n_hidden_layers),
             hidden_dim=int(cfg.model.hidden_dim),
+            skips=list(getattr(cfg.model, 'skips', [])),
+            last_activation=str(getattr(cfg.model, 'last_activation', 'softplus')),
         )
 
         self.volume_size = [int(v) for v in cfg.data.volume_size]
@@ -144,9 +146,9 @@ class CTReconLitModule(pl.LightningModule):
                 )
 
     def configure_optimizers(self):
-        """Configure Adam with encoder/MLP parameter groups and cosine schedule."""
+        """Configure Adam with encoder/MLP groups and configurable scheduler."""
         encoder_params = list(self.model.encoder.parameters())
-        mlp_params = list(self.model.mlp.parameters()) + list(self.model.attenuation_head.parameters())
+        mlp_params = list(self.model._mlp_layers.parameters()) + list(self.model.attenuation_head.parameters())
 
         optimizer = torch.optim.Adam(
             [
@@ -154,11 +156,20 @@ class CTReconLitModule(pl.LightningModule):
                 {'params': mlp_params, 'lr': float(self.cfg.train.lr_mlp)},
             ]
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=int(self.cfg.train.max_epochs),
-            eta_min=float(self.cfg.train.lr_min),
-        )
+
+        scheduler_type = str(getattr(self.cfg.train, 'scheduler_type', 'cosine')).lower()
+        if scheduler_type == 'step':
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=int(self.cfg.train.step_size),
+                gamma=float(self.cfg.train.gamma),
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=int(self.cfg.train.max_epochs),
+                eta_min=float(self.cfg.train.lr_min),
+            )
         return {
             'optimizer': optimizer,
             'lr_scheduler': {

@@ -1,0 +1,14 @@
+max_epochs: 3000
+batch_size: 1024
+n_samples: 576
+lr_mlp: 0.001
+lr_encoder: 0.001
+lr_min: 0.0001
+scheduler_type: step
+step_size: 1500
+gamma: 0.1
+val_every_n_epoch: 250
+chunk_size: 409600
+recon_chunk_size: 65536
+num_workers: 4
+precision: 32-true
