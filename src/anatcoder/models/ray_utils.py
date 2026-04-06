@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -19,6 +20,61 @@ def _to_tigre_world(coords: torch.Tensor) -> torch.Tensor:
     if coords.ndim != 2 or coords.shape[-1] != 3:
         raise ValueError(f'coords must be [N,3], got shape={tuple(coords.shape)}')
     return torch.stack((coords[:, 0], -coords[:, 2], -coords[:, 1]), dim=-1)
+
+
+def _angle2pose(DSO_m: float, angle: float) -> np.ndarray:
+    """NAF official-style pose transform from angle to camera-to-world matrix."""
+    phi1 = -np.pi / 2
+    R1 = np.array(
+        [[1.0, 0.0, 0.0], [0.0, np.cos(phi1), -np.sin(phi1)], [0.0, np.sin(phi1), np.cos(phi1)]],
+        dtype=np.float32,
+    )
+    phi2 = np.pi / 2
+    R2 = np.array(
+        [[np.cos(phi2), -np.sin(phi2), 0.0], [np.sin(phi2), np.cos(phi2), 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    R3 = np.array(
+        [[np.cos(angle), -np.sin(angle), 0.0], [np.sin(angle), np.cos(angle), 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    rot = R3 @ R2 @ R1
+    trans = np.array([DSO_m * np.cos(angle), DSO_m * np.sin(angle), 0.0], dtype=np.float32)
+    T = np.eye(4, dtype=np.float32)
+    T[:-1, :-1] = rot
+    T[:-1, -1] = trans
+    return T
+
+
+def generate_rays_for_view_naf(
+    geo: CBCTGeometry,
+    angle: float,
+    device: torch.device | str = torch.device('cpu'),
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate one-view rays with NAF official convention (meter units)."""
+    dev = device if isinstance(device, torch.device) else torch.device(device)
+    DSD_m = float(geo.DSD) / 1000.0
+    DSO_m = float(geo.DSO) / 1000.0
+    d_det_u = float(geo.d_detector[0]) / 1000.0
+    d_det_v = float(geo.d_detector[1]) / 1000.0
+
+    width = int(geo.n_detector[1])
+    height = int(geo.n_detector[0])
+
+    pose = torch.tensor(_angle2pose(DSO_m, float(angle)), dtype=torch.float32, device=dev)
+    i, j = torch.meshgrid(
+        torch.linspace(0, width - 1, width, device=dev, dtype=torch.float32),
+        torch.linspace(0, height - 1, height, device=dev, dtype=torch.float32),
+        indexing='ij',
+    )
+    uu = (i.t() + 0.5 - width / 2.0) * d_det_u
+    vv = (j.t() + 0.5 - height / 2.0) * d_det_v
+    dirs = torch.stack((uu / DSD_m, vv / DSD_m, torch.ones_like(uu)), dim=-1)
+
+    rays_d = torch.matmul(pose[:3, :3], dirs.unsqueeze(-1)).squeeze(-1)
+    rays_d = F.normalize(rays_d, dim=-1)
+    rays_o = pose[:3, -1].expand_as(rays_d)
+    return rays_o.reshape(-1, 3).to(torch.float32), rays_d.reshape(-1, 3).to(torch.float32)
 
 
 def generate_rays_for_view(
@@ -212,3 +268,30 @@ def normalize_coords(points: torch.Tensor, volume_size: list[float]) -> torch.Te
         raise ValueError(f'volume_size values must be positive, got {volume_size}')
 
     return points / size + 0.5
+
+
+def normalize_coords_naf(points: torch.Tensor, bound: float = 0.3) -> torch.Tensor:
+    """NAF-style coordinate normalization: clamp only in ``[-bound, bound]``."""
+    if bound <= 0:
+        raise ValueError(f'bound must be positive, got {bound}')
+    eps = 1e-6
+    return points.clamp(-float(bound) + eps, float(bound) - eps)
+
+
+def compute_near_far_naf(geo: CBCTGeometry, tolerance: float = 0.005) -> tuple[float, float]:
+    """Compute NAF near/far in meters following official geometric bounds."""
+    if tolerance < 0:
+        raise ValueError(f'tolerance must be non-negative, got {tolerance}')
+    dso = float(geo.DSO) / 1000.0
+    s_voxel = np.asarray(geo.n_voxel, dtype=np.float32) * (np.asarray(geo.d_voxel, dtype=np.float32) / 1000.0)
+    off_origin = np.zeros(3, dtype=np.float32)
+    half_x = float(s_voxel[0]) * 0.5
+    half_y = float(s_voxel[1]) * 0.5
+    dist1 = np.linalg.norm([off_origin[0] - half_x, off_origin[1] - half_y])
+    dist2 = np.linalg.norm([off_origin[0] - half_x, off_origin[1] + half_y])
+    dist3 = np.linalg.norm([off_origin[0] + half_x, off_origin[1] - half_y])
+    dist4 = np.linalg.norm([off_origin[0] + half_x, off_origin[1] + half_y])
+    dist_max = float(np.max([dist1, dist2, dist3, dist4]))
+    near = max(0.0, dso - dist_max - float(tolerance))
+    far = min(dso * 2.0, dso + dist_max + float(tolerance))
+    return near, far

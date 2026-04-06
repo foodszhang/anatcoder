@@ -52,6 +52,7 @@ class VanillaINR(nn.Module):
         self._encoder_dim = int(self.encoder.output_dim)
         self._hidden_dim = int(hidden_dim)
         self._skips = set(int(i) for i in skips) if skips is not None else set()
+        self.bound: float | None = None
         invalid_skips = [i for i in self._skips if i < 0 or i >= n_hidden_layers]
         if invalid_skips:
             raise ValueError(f'skip indices out of range: {invalid_skips}, n_hidden_layers={n_hidden_layers}')
@@ -92,7 +93,13 @@ class VanillaINR(nn.Module):
         """
         if coords.ndim != 2 or coords.shape[-1] != 3:
             raise ValueError(f'coords must be [N,3], got shape={tuple(coords.shape)}')
-        encoded = self.encoder(coords)
+        coords_in = coords
+        if self.bound is not None:
+            bound = float(self.bound)
+            if bound <= 0:
+                raise ValueError(f'bound must be positive, got {bound}')
+            coords_in = coords_in / (2.0 * bound) + 0.5
+        encoded = self.encoder(coords_in)
         # tinycudann hash-grid can emit fp16 features on CUDA; align with MLP weights.
         target_dtype = self._mlp_layers[0].weight.dtype
         if encoded.dtype != target_dtype:

@@ -9,3 +9,4 @@ n_hidden_layers: 4
 hidden_dim: 32
 skips: [2]
 last_activation: sigmoid
+bound: 0.3

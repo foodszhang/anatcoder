@@ -20,6 +20,7 @@ from rich.table import Table
 from anatcoder.data.dataset import CTDataModule
 from anatcoder.eval.global_metrics import evaluate_reconstruction
 from anatcoder.models.network import VanillaINR
+from anatcoder.models.ray_utils import compute_near_far_naf
 from anatcoder.models.renderer import reconstruct_volume, render_rays
 from anatcoder.utils.geometry import CBCTGeometry
 
@@ -54,6 +55,8 @@ class CTReconLitModule(pl.LightningModule):
             self.volume_size[2] * self.voxel_size[2],
         ]
         self.model.volume_size_mm = self.volume_size_mm
+        self.use_naf_rays = bool(getattr(cfg.data, 'use_naf_rays', False))
+        self.model.bound = float(getattr(cfg.model, 'bound', 0.3)) if self.use_naf_rays else None
 
         geo = CBCTGeometry(
             DSD=float(cfg.data.geo.DSD),
@@ -64,8 +67,11 @@ class CTReconLitModule(pl.LightningModule):
             d_detector=list(cfg.data.geo.d_detector),
         )
         diag = float(np.linalg.norm(np.asarray(self.volume_size_mm, dtype=np.float32)))
-        self.near = float(geo.DSO - 0.5 * diag)
-        self.far = float(geo.DSO + 0.5 * diag)
+        if self.use_naf_rays:
+            self.near, self.far = compute_near_far_naf(geo)
+        else:
+            self.near = float(geo.DSO - 0.5 * diag)
+            self.far = float(geo.DSO + 0.5 * diag)
         self._loss_history: list[float] = []
 
     def forward(self, ray_origins: torch.Tensor, ray_directions: torch.Tensor) -> torch.Tensor:
@@ -230,6 +236,7 @@ def main(cfg: DictConfig) -> None:
         geo=geo,
         batch_size=int(cfg.train.batch_size),
         num_workers=int(getattr(cfg.train, 'num_workers', 4)),
+        use_naf_rays=bool(getattr(cfg.data, 'use_naf_rays', False)),
     )
     model = CTReconLitModule(cfg)
 

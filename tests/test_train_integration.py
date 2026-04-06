@@ -92,6 +92,7 @@ def _make_cfg(data_root: Path) -> OmegaConf:
                 'proj_dir': str(data_root / 'projections'),
                 'case': 'case001',
                 'n_views': 10,
+                'use_naf_rays': False,
                 'volume_size': [32, 32, 32],
                 'voxel_size': [1.0, 1.0, 1.0],
                 'geo': {
