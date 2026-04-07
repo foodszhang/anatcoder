@@ -32,6 +32,22 @@ class ConstantModel(nn.Module):
         return self.query_density(coords)
 
 
+class CaptureInputModel(nn.Module):
+    """Model that records queried coords for normalization-path assertions."""
+
+    def __init__(self, bound: float):
+        super().__init__()
+        self.bound = float(bound)
+        self.captured: torch.Tensor | None = None
+
+    def query_density(self, coords: torch.Tensor) -> torch.Tensor:
+        self.captured = coords.detach().clone()
+        return torch.ones((coords.shape[0], 1), dtype=coords.dtype, device=coords.device)
+
+    def forward(self, coords: torch.Tensor) -> torch.Tensor:
+        return self.query_density(coords)
+
+
 def test_volume_renderer_shape() -> None:
     """测试体渲染器输出 shape。"""
     renderer = VolumeRenderer()
@@ -102,3 +118,38 @@ def test_reconstruct_volume_shape() -> None:
     assert volume.shape == (16, 16, 16)
     assert volume.dtype == np.float32
     assert np.allclose(volume, 0.02, atol=1e-6)
+
+
+def test_render_rays_naf_maps_to_unit_interval() -> None:
+    """NAF path should map clamped coords from [-bound,bound] to [0,1]."""
+    model = CaptureInputModel(bound=0.3)
+    origins = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)
+    directions = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)
+    _ = render_rays(
+        model,
+        origins,
+        directions,
+        n_samples=8,
+        near=-0.6,
+        far=0.6,
+        perturb=False,
+        chunk_size=64,
+    )
+    assert model.captured is not None
+    assert torch.all(model.captured >= 0.0)
+    assert torch.all(model.captured <= 1.0)
+
+
+def test_reconstruct_volume_naf_maps_to_unit_interval() -> None:
+    """NAF reconstruction path should feed [0,1]-mapped coords to encoder/query."""
+    model = CaptureInputModel(bound=0.3)
+    _ = reconstruct_volume(
+        model=model,
+        volume_size=[4, 4, 4],
+        voxel_size=[1.0, 1.0, 1.0],
+        chunk_size=1024,
+        device=torch.device('cpu'),
+    )
+    assert model.captured is not None
+    assert torch.all(model.captured >= 0.0)
+    assert torch.all(model.captured <= 1.0)

@@ -93,13 +93,7 @@ class VanillaINR(nn.Module):
         """
         if coords.ndim != 2 or coords.shape[-1] != 3:
             raise ValueError(f'coords must be [N,3], got shape={tuple(coords.shape)}')
-        coords_in = coords
-        if self.bound is not None:
-            bound = float(self.bound)
-            if bound <= 0:
-                raise ValueError(f'bound must be positive, got {bound}')
-            coords_in = coords_in / (2.0 * bound) + 0.5
-        encoded = self.encoder(coords_in)
+        encoded = self.encoder(coords)
         # tinycudann hash-grid can emit fp16 features on CUDA; align with MLP weights.
         target_dtype = self._mlp_layers[0].weight.dtype
         if encoded.dtype != target_dtype:

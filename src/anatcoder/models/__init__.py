@@ -9,7 +9,6 @@ from .ray_utils import (
     generate_rays_for_view,
     generate_rays_for_view_naf,
     normalize_coords,
-    normalize_coords_naf,
     sample_points_along_rays,
 )
 from .renderer import VolumeRenderer, reconstruct_volume, render_rays
@@ -27,7 +26,6 @@ __all__ = [
     "generate_rays_for_view",
     "generate_rays_for_view_naf",
     "normalize_coords",
-    "normalize_coords_naf",
     "reconstruct_volume",
     "render_rays",
     "sample_points_along_rays",

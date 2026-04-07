@@ -270,14 +270,6 @@ def normalize_coords(points: torch.Tensor, volume_size: list[float]) -> torch.Te
     return points / size + 0.5
 
 
-def normalize_coords_naf(points: torch.Tensor, bound: float = 0.3) -> torch.Tensor:
-    """NAF-style coordinate normalization: clamp only in ``[-bound, bound]``."""
-    if bound <= 0:
-        raise ValueError(f'bound must be positive, got {bound}')
-    eps = 1e-6
-    return points.clamp(-float(bound) + eps, float(bound) - eps)
-
-
 def compute_near_far_naf(geo: CBCTGeometry, tolerance: float = 0.005) -> tuple[float, float]:
     """Compute NAF near/far in meters following official geometric bounds."""
     if tolerance < 0:

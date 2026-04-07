@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from anatcoder.models.ray_utils import normalize_coords, normalize_coords_naf, sample_points_along_rays
+from anatcoder.models.ray_utils import normalize_coords, sample_points_along_rays
 
 
 class VolumeRenderer(nn.Module):
@@ -75,7 +75,11 @@ def render_rays(
     )
     bound = getattr(model, 'bound', None)
     if bound is not None:
-        points_norm = normalize_coords_naf(points, float(bound))
+        bound_val = float(bound)
+        if bound_val <= 0:
+            raise ValueError(f'model.bound must be positive, got {bound_val}')
+        clamped = points.clamp(-bound_val, bound_val)
+        points_norm = (clamped + bound_val) / (2.0 * bound_val)
     else:
         volume_size = getattr(model, 'volume_size_mm', None)
         if volume_size is None:
@@ -123,6 +127,9 @@ def reconstruct_volume(
     batch_size = int(chunk_size)
 
     if bound is not None:
+        bound_val = float(bound)
+        if bound_val <= 0:
+            raise ValueError(f'model.bound must be positive, got {bound_val}')
         n1, n2, n3 = nz, ny, nx
         d1, d2, d3 = dz, dy, dx
         s1 = (n1 * d1 / 1000.0) / 2.0 - (d1 / 1000.0) / 2.0
@@ -135,7 +142,8 @@ def reconstruct_volume(
             indexing='ij',
         )
         normalized = torch.stack((c1, c2, c3), dim=-1).reshape(-1, 3)
-        normalized = normalize_coords_naf(normalized, float(bound))
+        clamped = normalized.clamp(-bound_val, bound_val)
+        normalized = (clamped + bound_val) / (2.0 * bound_val)
     else:
         x = torch.linspace(-(nx - 1) / 2 * dx, (nx - 1) / 2 * dx, nx)
         y = torch.linspace(-(ny - 1) / 2 * dy, (ny - 1) / 2 * dy, ny)
