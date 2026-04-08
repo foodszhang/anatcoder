@@ -196,3 +196,32 @@ def test_reconstruct_after_training(tmp_path: Path) -> None:
     )
     assert recon.shape == (32, 32, 32)
     assert np.isfinite(recon).all()
+
+
+def test_projection_psnr_metric_is_computable(tmp_path: Path) -> None:
+    """Validation helper should compute a finite projection-domain PSNR."""
+    case_dir, proj_case_dir = _build_synthetic_case(tmp_path)
+    cfg = _make_cfg(tmp_path)
+    geo = CBCTGeometry(
+        DSD=cfg.data.geo.DSD,
+        DSO=cfg.data.geo.DSO,
+        n_voxel=cfg.data.volume_size,
+        d_voxel=cfg.data.voxel_size,
+        n_detector=cfg.data.geo.n_detector,
+        d_detector=cfg.data.geo.d_detector,
+    )
+    dm = CTDataModule(
+        case_dir=str(case_dir),
+        proj_dir=str(proj_case_dir),
+        n_views=10,
+        geo=geo,
+        batch_size=64,
+        num_workers=0,
+    )
+    dm.setup()
+    module = CTReconLitModule(cfg)
+    module.to(torch.device('cpu'))
+    module.eval()
+
+    proj_psnr = module._compute_projection_psnr(dm)
+    assert np.isfinite(proj_psnr)

@@ -18,7 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from anatcoder.data.dataset import CTDataModule
-from anatcoder.eval.global_metrics import evaluate_reconstruction
+from anatcoder.eval.global_metrics import compute_psnr, evaluate_reconstruction
 from anatcoder.models.network import VanillaINR
 from anatcoder.models.ray_utils import compute_near_far_naf
 from anatcoder.models.renderer import reconstruct_volume, render_rays
@@ -54,9 +54,23 @@ class CTReconLitModule(pl.LightningModule):
             self.volume_size[1] * self.voxel_size[1],
             self.volume_size[2] * self.voxel_size[2],
         ]
+        self.volume_size_m = [v / 1000.0 for v in self.volume_size_mm]
         self.model.volume_size_mm = self.volume_size_mm
         self.use_naf_rays = bool(getattr(cfg.data, 'use_naf_rays', False))
-        self.model.bound = float(getattr(cfg.model, 'bound', 0.3)) if self.use_naf_rays else None
+        if self.use_naf_rays:
+            self.model.bound = None
+            self.model.volume_size_world = self.volume_size_m
+            self.model.voxel_size_world = [v / 1000.0 for v in self.voxel_size]
+            self.model.coord_axis_mode = 'identity'
+            self.model.zero_outside_volume = True
+            self.model.line_integral_scale = 1000.0
+        else:
+            self.model.bound = None
+            self.model.volume_size_world = self.volume_size_mm
+            self.model.voxel_size_world = self.voxel_size
+            self.model.coord_axis_mode = 'legacy'
+            self.model.zero_outside_volume = False
+            self.model.line_integral_scale = 1.0
 
         geo = CBCTGeometry(
             DSD=float(cfg.data.geo.DSD),
@@ -139,6 +153,8 @@ class CTReconLitModule(pl.LightningModule):
         self.log('val/psnr', float(metrics['psnr']), on_step=False, on_epoch=True, prog_bar=True)
         self.log('val/ssim', float(metrics['ssim']), on_step=False, on_epoch=True, prog_bar=False)
         self.log('val/mae', float(metrics['mae']), on_step=False, on_epoch=True, prog_bar=False)
+        proj_psnr = self._compute_projection_psnr(datamodule)
+        self.log('val/proj_psnr', float(proj_psnr), on_step=False, on_epoch=True, prog_bar=False)
 
         if self.logger is not None and hasattr(self.logger, 'experiment'):
             exp = self.logger.experiment
@@ -150,6 +166,52 @@ class CTReconLitModule(pl.LightningModule):
                     global_step=self.global_step,
                     dataformats='CHW',
                 )
+
+    def _compute_projection_psnr(self, datamodule: Any) -> float:
+        """Render one random view and compute projection-domain PSNR against GT."""
+        dataset = getattr(datamodule, 'dataset', None)
+        if dataset is None:
+            raise RuntimeError('Validation datamodule must expose initialized `dataset`.')
+        required = ['_ray_origins', '_ray_directions', '_gt_pixels', 'n_view_loaded', 'det_rows', 'det_cols']
+        for attr in required:
+            if not hasattr(dataset, attr):
+                raise RuntimeError(f'Dataset missing required attribute for projection PSNR: {attr}')
+
+        n_views = int(dataset.n_view_loaded)
+        rows = int(dataset.det_rows)
+        cols = int(dataset.det_cols)
+        if n_views <= 0 or rows <= 0 or cols <= 0:
+            raise RuntimeError(f'Invalid dataset geometry for projection PSNR: views={n_views}, rows={rows}, cols={cols}')
+
+        view_idx = int(np.random.randint(0, n_views))
+        rays_per_view = rows * cols
+        start = view_idx * rays_per_view
+        end = start + rays_per_view
+
+        ray_origins = torch.from_numpy(dataset._ray_origins[start:end]).to(self.device, non_blocking=True)
+        ray_directions = torch.from_numpy(dataset._ray_directions[start:end]).to(self.device, non_blocking=True)
+        gt_pixels = torch.from_numpy(dataset._gt_pixels[start:end]).to(self.device, non_blocking=True)
+
+        pred_pixels = render_rays(
+            model=self.model,
+            ray_origins=ray_origins,
+            ray_directions=ray_directions,
+            n_samples=int(self.cfg.train.n_samples),
+            near=self.near,
+            far=self.far,
+            perturb=False,
+            chunk_size=int(self.cfg.train.chunk_size),
+        )
+        return float(
+            compute_psnr(
+                pred_pixels.detach().float().cpu().numpy(),
+                gt_pixels.detach().float().cpu().numpy(),
+                data_range=max(
+                    1e-6,
+                    float((gt_pixels.max() - gt_pixels.min()).detach().cpu().item()),
+                ),
+            )
+        )
 
     def configure_optimizers(self):
         """Configure Adam with encoder/MLP groups and configurable scheduler."""

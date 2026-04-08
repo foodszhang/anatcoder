@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from anatcoder.models.ray_utils import normalize_coords, sample_points_along_rays
+from anatcoder.models.ray_utils import sample_points_along_rays
 
 
 class VolumeRenderer(nn.Module):
@@ -73,20 +73,24 @@ def render_rays(
         far=far,
         perturb=perturb,
     )
-    bound = getattr(model, 'bound', None)
-    if bound is not None:
-        bound_val = float(bound)
-        if bound_val <= 0:
-            raise ValueError(f'model.bound must be positive, got {bound_val}')
-        clamped = points.clamp(-bound_val, bound_val)
-        points_norm = (clamped + bound_val) / (2.0 * bound_val)
-    else:
+    volume_size = getattr(model, 'volume_size_world', None)
+    if volume_size is None:
         volume_size = getattr(model, 'volume_size_mm', None)
-        if volume_size is None:
-            raise AttributeError('model must define `volume_size_mm` for coordinate normalization')
-        points_norm = normalize_coords(points, list(volume_size))
+    if volume_size is None:
+        raise AttributeError('model must define `volume_size_world` (or `volume_size_mm`) for normalization')
+    volume_size_t = torch.as_tensor(volume_size, dtype=points.dtype, device=points.device)
+    if torch.any(volume_size_t <= 0):
+        raise ValueError(f'volume size must be positive, got {volume_size}')
+    points_norm = points / volume_size_t + 0.5
 
-    flat_points = points_norm.reshape(-1, 3)
+    inside_mask: torch.Tensor | None = None
+    if bool(getattr(model, 'zero_outside_volume', False)):
+        inside_mask = ((points_norm >= 0.0) & (points_norm <= 1.0)).all(dim=-1)
+        points_query = points_norm.clamp(0.0, 1.0)
+    else:
+        points_query = points_norm
+
+    flat_points = points_query.reshape(-1, 3)
     pred_chunks: list[torch.Tensor] = []
     for start in range(0, flat_points.shape[0], chunk_size):
         end = min(start + chunk_size, flat_points.shape[0])
@@ -98,6 +102,12 @@ def render_rays(
         pred_chunks.append(pred)
 
     densities = torch.cat(pred_chunks, dim=0).reshape(ray_origins.shape[0], n_samples, 1)
+    if inside_mask is not None:
+        densities = densities * inside_mask.to(dtype=densities.dtype).unsqueeze(-1)
+    line_integral_scale = float(getattr(model, 'line_integral_scale', 1.0))
+    if line_integral_scale <= 0:
+        raise ValueError(f'model.line_integral_scale must be positive, got {line_integral_scale}')
+    step_sizes = step_sizes * line_integral_scale
     renderer = VolumeRenderer().to(ray_origins.device)
     return renderer(densities, step_sizes)
 
@@ -109,11 +119,7 @@ def reconstruct_volume(
     chunk_size: int = 65536,
     device: torch.device = torch.device('cuda'),
 ) -> np.ndarray:
-    """重建 3D 体数据。
-
-    坐标映射由 bruteforce_recon_coords.py 确定:
-    最优配置 axes=(-y,-x,-z), no _to_tigre_world, PSNR=28.06@epoch9
-    """
+    """Reconstruct a dense 3D volume from an implicit density model."""
     if len(volume_size) != 3:
         raise ValueError(f'volume_size must have length 3, got {volume_size}')
     if len(voxel_size) != 3:
@@ -121,37 +127,35 @@ def reconstruct_volume(
     if chunk_size <= 0:
         raise ValueError(f'chunk_size must be positive, got {chunk_size}')
 
-    bound = getattr(model, 'bound', None)
     nz, ny, nx = [int(v) for v in volume_size]
-    dz, dy, dx = [float(v) for v in voxel_size]
+    voxel_size_world = getattr(model, 'voxel_size_world', voxel_size)
+    if len(voxel_size_world) != 3:
+        raise ValueError(f'voxel_size_world must have length 3, got {voxel_size_world}')
+    dz, dy, dx = [float(v) for v in voxel_size_world]
+    volume_size_world = getattr(model, 'volume_size_world', None)
+    if volume_size_world is None:
+        volume_size_world = getattr(model, 'volume_size_mm', None)
+    if volume_size_world is None:
+        volume_size_world = [float(nz * dz), float(ny * dy), float(nx * dx)]
+    if len(volume_size_world) != 3:
+        raise ValueError(f'volume_size_world must have length 3, got {volume_size_world}')
     batch_size = int(chunk_size)
 
-    if bound is not None:
-        bound_val = float(bound)
-        if bound_val <= 0:
-            raise ValueError(f'model.bound must be positive, got {bound_val}')
-        n1, n2, n3 = nz, ny, nx
-        d1, d2, d3 = dz, dy, dx
-        s1 = (n1 * d1 / 1000.0) / 2.0 - (d1 / 1000.0) / 2.0
-        s2 = (n2 * d2 / 1000.0) / 2.0 - (d2 / 1000.0) / 2.0
-        s3 = (n3 * d3 / 1000.0) / 2.0 - (d3 / 1000.0) / 2.0
-        c1, c2, c3 = torch.meshgrid(
-            torch.linspace(-s1, s1, n1, dtype=torch.float32),
-            torch.linspace(-s2, s2, n2, dtype=torch.float32),
-            torch.linspace(-s3, s3, n3, dtype=torch.float32),
-            indexing='ij',
-        )
-        normalized = torch.stack((c1, c2, c3), dim=-1).reshape(-1, 3)
-        clamped = normalized.clamp(-bound_val, bound_val)
-        normalized = (clamped + bound_val) / (2.0 * bound_val)
+    axis_mode = str(getattr(model, 'coord_axis_mode', 'legacy')).lower()
+    x = torch.linspace(-(nx - 1) / 2 * dx, (nx - 1) / 2 * dx, nx)
+    y = torch.linspace(-(ny - 1) / 2 * dy, (ny - 1) / 2 * dy, ny)
+    z = torch.linspace(-(nz - 1) / 2 * dz, (nz - 1) / 2 * dz, nz)
+    zz, yy, xx = torch.meshgrid(z, y, x, indexing='ij')
+    if axis_mode == 'identity':
+        phys = torch.stack((zz, yy, xx), dim=-1).reshape(-1, 3)
     else:
-        x = torch.linspace(-(nx - 1) / 2 * dx, (nx - 1) / 2 * dx, nx)
-        y = torch.linspace(-(ny - 1) / 2 * dy, (ny - 1) / 2 * dy, ny)
-        z = torch.linspace(-(nz - 1) / 2 * dz, (nz - 1) / 2 * dz, nz)
-        zz, yy, xx = torch.meshgrid(z, y, x, indexing='ij')
-        phys = torch.stack([-yy, -xx, -zz], dim=-1).reshape(-1, 3)
-        vol_mm = [float(nx * dx), float(ny * dy), float(nz * dz)]
-        normalized = normalize_coords(phys, vol_mm)
+        phys = torch.stack((-yy, -xx, -zz), dim=-1).reshape(-1, 3)
+    volume_size_t = torch.as_tensor(volume_size_world, dtype=phys.dtype, device=phys.device)
+    if torch.any(volume_size_t <= 0):
+        raise ValueError(f'volume size must be positive, got {volume_size_world}')
+    normalized = phys / volume_size_t + 0.5
+    if bool(getattr(model, 'zero_outside_volume', False)):
+        normalized = normalized.clamp(0.0, 1.0)
 
     try:
         infer_device = next(model.parameters()).device

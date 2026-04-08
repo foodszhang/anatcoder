@@ -8,6 +8,7 @@ from .ray_utils import (
     generate_rays_batch,
     generate_rays_for_view,
     generate_rays_for_view_naf,
+    generate_rays_for_view_naf_tigre,
     normalize_coords,
     sample_points_along_rays,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "generate_rays_batch",
     "generate_rays_for_view",
     "generate_rays_for_view_naf",
+    "generate_rays_for_view_naf_tigre",
     "normalize_coords",
     "reconstruct_volume",
     "render_rays",

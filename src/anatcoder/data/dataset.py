@@ -11,7 +11,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-from anatcoder.models.ray_utils import compute_near_far_naf, generate_rays_for_view, generate_rays_for_view_naf
+from anatcoder.models.ray_utils import (
+    compute_near_far_naf,
+    generate_rays_for_view,
+    generate_rays_for_view_naf_tigre,
+)
 from anatcoder.utils.geometry import CBCTGeometry
 from anatcoder.utils.io import load_numpy
 
@@ -79,7 +83,7 @@ class CTProjectionDataset(Dataset[dict[str, torch.Tensor]]):
         ray_directions: list[np.ndarray] = []
         for angle in self.angles:
             if self.use_naf_rays:
-                origins_t, dirs_t = generate_rays_for_view_naf(
+                origins_t, dirs_t = generate_rays_for_view_naf_tigre(
                     self.geo,
                     float(angle),
                     device=torch.device('cpu'),
@@ -97,9 +101,8 @@ class CTProjectionDataset(Dataset[dict[str, torch.Tensor]]):
         gt_views: list[np.ndarray] = []
         for k in range(self.n_view_loaded):
             if self.use_naf_rays:
-                # NAF ray path uses meter distances; projections generated with
-                # TIGRE mm geometry are converted to meter-equivalent integrals.
-                gt_views.append((self.projections[k] / 1000.0).reshape(-1))
+                # Keep GT projection values in TIGRE mm integral units.
+                gt_views.append(self.projections[k].reshape(-1))
             else:
                 gt_views.append(self.projections[k].flatten(order='F'))
         self._gt_pixels = np.concatenate(gt_views).astype(np.float32, copy=False)

@@ -22,6 +22,13 @@ def _to_tigre_world(coords: torch.Tensor) -> torch.Tensor:
     return torch.stack((coords[:, 0], -coords[:, 2], -coords[:, 1]), dim=-1)
 
 
+def _naf_to_tigre_world(coords: torch.Tensor) -> torch.Tensor:
+    """Map raw NAF ray frame into TIGRE-aligned world axes."""
+    if coords.ndim != 2 or coords.shape[-1] != 3:
+        raise ValueError(f'coords must be [N,3], got shape={tuple(coords.shape)}')
+    return torch.stack((-coords[:, 2], coords[:, 1], coords[:, 0]), dim=-1)
+
+
 def _angle2pose(DSO_m: float, angle: float) -> np.ndarray:
     """NAF official-style pose transform from angle to camera-to-world matrix."""
     phi1 = -np.pi / 2
@@ -75,6 +82,18 @@ def generate_rays_for_view_naf(
     rays_d = F.normalize(rays_d, dim=-1)
     rays_o = pose[:3, -1].expand_as(rays_d)
     return rays_o.reshape(-1, 3).to(torch.float32), rays_d.reshape(-1, 3).to(torch.float32)
+
+
+def generate_rays_for_view_naf_tigre(
+    geo: CBCTGeometry,
+    angle: float,
+    device: torch.device | str = torch.device('cpu'),
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate NAF rays transformed into TIGRE-aligned world coordinates."""
+    origins, directions = generate_rays_for_view_naf(geo=geo, angle=angle, device=device)
+    origins = _naf_to_tigre_world(origins)
+    directions = F.normalize(_naf_to_tigre_world(directions), dim=-1)
+    return origins.to(torch.float32), directions.to(torch.float32)
 
 
 def generate_rays_for_view(
