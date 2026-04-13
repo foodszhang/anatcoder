@@ -5,5 +5,3 @@ defaults:
   - override /data: default
 
 experiment_name: "naf_baseline_${data.case}_${data.n_views}views"
-data:
-  use_naf_rays: true

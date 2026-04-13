@@ -15,7 +15,7 @@ SRC_DIR = REPO_ROOT / 'src'
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from anatcoder.models.renderer import VolumeRenderer, reconstruct_volume, render_rays
+from anatcoder.models.renderer import VolumeRenderer, reconstruct_volume, render_rays  # noqa: E402
 
 
 class ConstantModel(nn.Module):
@@ -98,6 +98,43 @@ class GridOracleModel(nn.Module):
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
         return self.query_density(coords)
+
+
+class AnatomyConditionModel(nn.Module):
+    """Simple model using anatomy one-hot to predict class-dependent constants."""
+
+    def __init__(self, class_values: list[float], volume_size_world: list[float]):
+        super().__init__()
+        self.register_buffer('class_values', torch.tensor(class_values, dtype=torch.float32))
+        self.volume_size_world = volume_size_world
+
+    def query_density(self, coords: torch.Tensor, anatomy_onehot: torch.Tensor | None = None) -> torch.Tensor:
+        if anatomy_onehot is None:
+            raise ValueError('anatomy_onehot is required')
+        weights = self.class_values.to(device=coords.device, dtype=coords.dtype).unsqueeze(0)
+        return torch.sum(anatomy_onehot.to(dtype=coords.dtype) * weights, dim=-1, keepdim=True)
+
+    def forward(self, coords: torch.Tensor, anatomy_onehot: torch.Tensor | None = None) -> torch.Tensor:
+        return self.query_density(coords, anatomy_onehot=anatomy_onehot)
+
+
+class AnatomyLabelModel(nn.Module):
+    """Simple model using integer anatomy labels for class-dependent constants."""
+
+    def __init__(self, class_values: list[float], volume_size_world: list[float]):
+        super().__init__()
+        self.register_buffer('class_values', torch.tensor(class_values, dtype=torch.float32))
+        self.volume_size_world = volume_size_world
+
+    def query_density(self, coords: torch.Tensor, anatomy_labels: torch.Tensor | None = None) -> torch.Tensor:
+        if anatomy_labels is None:
+            raise ValueError('anatomy_labels is required')
+        labels = anatomy_labels.to(dtype=torch.long).clamp(0, self.class_values.numel() - 1)
+        values = self.class_values.to(device=coords.device, dtype=coords.dtype)[labels]
+        return values.unsqueeze(-1)
+
+    def forward(self, coords: torch.Tensor, anatomy_labels: torch.Tensor | None = None) -> torch.Tensor:
+        return self.query_density(coords, anatomy_labels=anatomy_labels)
 
 
 def test_volume_renderer_shape() -> None:
@@ -277,3 +314,87 @@ def test_reconstruct_volume_identity_axis_mode_matches_oracle_grid() -> None:
         device=torch.device('cpu'),
     )
     assert np.max(np.abs(recon - volume)) < 1e-5
+
+
+def test_render_rays_oracle_seg_condition() -> None:
+    """Render path should sample seg labels and pass anatomy one-hot into model."""
+    model = AnatomyConditionModel(class_values=[0.1, 0.2, 0.3], volume_size_world=[4.0, 4.0, 4.0])
+    seg = torch.full((4, 4, 4), 2, dtype=torch.int64)
+    origins = torch.zeros((5, 3), dtype=torch.float32)
+    directions = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32).repeat(5, 1)
+    out = render_rays(
+        model=model,
+        ray_origins=origins,
+        ray_directions=directions,
+        n_samples=64,
+        near=-1.0,
+        far=1.0,
+        perturb=False,
+        chunk_size=256,
+        seg_volume=seg,
+        n_anatomy_classes=3,
+    )
+    assert out.shape == (5,)
+    assert torch.allclose(out, torch.full((5,), 0.6, dtype=torch.float32), atol=1e-5)
+
+
+def test_reconstruct_volume_oracle_seg_condition() -> None:
+    """Reconstruction path should use seg-conditioned anatomy query."""
+    model = AnatomyConditionModel(class_values=[0.25, 0.75], volume_size_world=[4.0, 4.0, 4.0])
+    seg = torch.zeros((4, 4, 4), dtype=torch.int64)
+    seg[:, :, 2:] = 1
+    recon = reconstruct_volume(
+        model=model,
+        volume_size=[4, 4, 4],
+        voxel_size=[1.0, 1.0, 1.0],
+        chunk_size=128,
+        device=torch.device('cpu'),
+        seg_volume=seg,
+        n_anatomy_classes=2,
+    )
+    assert recon.shape == (4, 4, 4)
+    assert np.isclose(float(recon[:, :, :2].mean()), 0.25, atol=1e-6)
+    assert np.isclose(float(recon[:, :, 2:].mean()), 0.75, atol=1e-6)
+
+
+def test_render_rays_seg_label_condition() -> None:
+    """Render path should pass nearest-sampled integer seg labels into model."""
+    model = AnatomyLabelModel(class_values=[0.05, 0.4], volume_size_world=[4.0, 4.0, 4.0])
+    seg = torch.zeros((4, 4, 4), dtype=torch.int64)
+    seg[:, :, 2:] = 1
+    origins = torch.zeros((4, 3), dtype=torch.float32)
+    directions = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32).repeat(4, 1)
+
+    out = render_rays(
+        model=model,
+        ray_origins=origins,
+        ray_directions=directions,
+        n_samples=64,
+        near=-1.0,
+        far=1.0,
+        perturb=False,
+        chunk_size=256,
+        seg_volume=seg,
+        n_anatomy_classes=2,
+    )
+    assert out.shape == (4,)
+    assert torch.allclose(out, torch.full((4,), 0.45, dtype=torch.float32), atol=1e-5)
+
+
+def test_reconstruct_volume_seg_label_condition() -> None:
+    """Reconstruction path should route voxels to label-specific attenuation heads."""
+    model = AnatomyLabelModel(class_values=[0.12, 0.88], volume_size_world=[4.0, 4.0, 4.0])
+    seg = torch.zeros((4, 4, 4), dtype=torch.int64)
+    seg[:, 2:, :] = 1
+    recon = reconstruct_volume(
+        model=model,
+        volume_size=[4, 4, 4],
+        voxel_size=[1.0, 1.0, 1.0],
+        chunk_size=128,
+        device=torch.device('cpu'),
+        seg_volume=seg,
+        n_anatomy_classes=2,
+    )
+    assert recon.shape == (4, 4, 4)
+    assert np.isclose(float(recon[:, :2, :].mean()), 0.12, atol=1e-6)
+    assert np.isclose(float(recon[:, 2:, :].mean()), 0.88, atol=1e-6)

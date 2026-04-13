@@ -9,4 +9,3 @@ geo:
   DSO: 1000
   n_detector: [256, 256]
   d_detector: [1.5, 1.5]
-use_naf_rays: false

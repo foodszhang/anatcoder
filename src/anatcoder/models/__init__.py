@@ -1,5 +1,6 @@
 """Model definitions for AnatCoder and benchmark baselines."""
 
+from .advr_network import ADVRNetwork
 from .anatcoder.network import AnatCoderNetwork
 from .encoder import HashGridEncoder, PositionalEncoder
 from .network import VanillaINR
@@ -16,6 +17,7 @@ from .renderer import VolumeRenderer, reconstruct_volume, render_rays
 from .vanilla_inr.network import VanillaINRNetwork
 
 __all__ = [
+    "ADVRNetwork",
     "AnatCoderNetwork",
     "compute_near_far_naf",
     "HashGridEncoder",

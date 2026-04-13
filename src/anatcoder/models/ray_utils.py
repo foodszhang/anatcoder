@@ -12,10 +12,13 @@ from anatcoder.utils.geometry import CBCTGeometry
 
 
 def _to_tigre_world(coords: torch.Tensor) -> torch.Tensor:
-    """Map internal coordinates to TIGRE-compatible world axes.
+    """[Deprecated] Map legacy internal coordinates to TIGRE-compatible world axes.
 
     TIGRE's world frame for the Python volume convention can be matched by
     reordering/signing axes as ``[x, -z, -y]``.
+
+    Deprecated: use :func:`_naf_to_tigre_world` via
+    :func:`generate_rays_for_view_naf_tigre` for the default pipeline.
     """
     if coords.ndim != 2 or coords.shape[-1] != 3:
         raise ValueError(f'coords must be [N,3], got shape={tuple(coords.shape)}')
@@ -101,7 +104,7 @@ def generate_rays_for_view(
     angle: float,
     device: torch.device = torch.device('cpu'),
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Generate all detector rays for one CBCT view angle.
+    """[Deprecated] Generate legacy detector rays for one CBCT view angle.
 
     Args:
         geo: CBCT scanning geometry.
@@ -112,6 +115,8 @@ def generate_rays_for_view(
         A tuple ``(ray_origins, ray_directions)``:
             - ``ray_origins`` has shape ``[rows * cols, 3]``.
             - ``ray_directions`` has shape ``[rows * cols, 3]`` and unit norm.
+
+    Deprecated: use :func:`generate_rays_for_view_naf_tigre`.
     """
     rows, cols = int(geo.n_detector[0]), int(geo.n_detector[1])
     d_row, d_col = float(geo.d_detector[0]), float(geo.d_detector[1])

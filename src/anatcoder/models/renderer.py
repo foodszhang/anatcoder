@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from anatcoder.models.ray_utils import sample_points_along_rays
 
@@ -37,6 +40,143 @@ class VolumeRenderer(nn.Module):
         return torch.sum(densities * step_sizes, dim=1)
 
 
+def _query_model_density(
+    model: nn.Module,
+    coords: torch.Tensor,
+    anatomy_labels: torch.Tensor | None = None,
+    n_anatomy_classes: int = 0,
+) -> torch.Tensor:
+    """Query model density with optional anatomy condition labels.
+
+    Keeps backward compatibility for models that only accept positional inputs.
+    """
+    fn = model.query_density if hasattr(model, 'query_density') else model
+    if anatomy_labels is None:
+        return fn(coords)
+    try:
+        return fn(coords, anatomy_labels=anatomy_labels)
+    except TypeError as exc:
+        # Backward compatibility: older oracle path expects one-hot conditioning.
+        if n_anatomy_classes <= 0:
+            raise TypeError(
+                'Model does not accept anatomy_labels and no valid class count was provided for one-hot fallback.'
+            ) from exc
+        labels = anatomy_labels.to(dtype=torch.long).clamp(0, int(n_anatomy_classes) - 1)
+        anatomy_onehot = F.one_hot(labels, num_classes=int(n_anatomy_classes)).to(dtype=coords.dtype)
+        try:
+            return fn(coords, anatomy_onehot=anatomy_onehot)
+        except TypeError as exc_onehot:
+            raise TypeError(
+                'Model does not accept anatomy_labels or anatomy_onehot, but anatomy conditioning was requested.'
+            ) from exc_onehot
+
+
+def _prepare_seg_volume_labels(
+    seg_volume: torch.Tensor | np.ndarray | None,
+    n_anatomy_classes: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Convert segmentation input into float label volume ``[1,1,D,H,W]``."""
+    if seg_volume is None:
+        return None
+    if n_anatomy_classes <= 0:
+        raise ValueError(f'n_anatomy_classes must be positive when seg_volume is provided, got {n_anatomy_classes}')
+
+    seg_t = torch.as_tensor(seg_volume)
+    labels: torch.Tensor
+    if seg_t.ndim == 3:
+        labels = seg_t.to(dtype=torch.long)
+    elif seg_t.ndim == 4:
+        if seg_t.shape[0] == n_anatomy_classes:
+            labels = torch.argmax(seg_t, dim=0)
+        elif seg_t.shape[0] == 1:
+            labels = seg_t.squeeze(0).to(dtype=torch.long)
+        else:
+            raise ValueError(
+                '4D seg volume must be [C,D,H,W] with C=n_anatomy_classes or [1,D,H,W], '
+                f'got shape={tuple(seg_t.shape)} and C={n_anatomy_classes}'
+            )
+    elif seg_t.ndim == 5:
+        if seg_t.shape[0] != 1:
+            raise ValueError(f'5D seg volume must have batch size 1, got shape={tuple(seg_t.shape)}')
+        if seg_t.shape[1] == n_anatomy_classes:
+            labels = torch.argmax(seg_t, dim=1).squeeze(0)
+        elif seg_t.shape[1] == 1:
+            labels = seg_t.squeeze(0).squeeze(0).to(dtype=torch.long)
+        else:
+            raise ValueError(
+                '5D seg volume must be [1,C,D,H,W] with C=n_anatomy_classes or C=1, '
+                f'got shape={tuple(seg_t.shape)} and C={n_anatomy_classes}'
+            )
+    else:
+        raise ValueError(f'seg_volume must be 3D labels or 4D/5D one-hot/label, got shape={tuple(seg_t.shape)}')
+
+    labels = labels.clamp(0, n_anatomy_classes - 1)
+    return labels.unsqueeze(0).unsqueeze(0).to(device=device, dtype=torch.float32, non_blocking=True)
+
+
+def _sample_anatomy_labels(
+    seg_volume_labels: torch.Tensor,
+    points_norm: torch.Tensor,
+    n_anatomy_classes: int,
+) -> torch.Tensor:
+    """Sample anatomy label ids at normalized points.
+
+    Args:
+        seg_volume_labels: Float label volume ``[1,1,D,H,W]``.
+        points_norm: Normalized coordinates in ``[0,1]^3`` with ``[..., 3]`` in ``(z,y,x)``.
+        n_anatomy_classes: Number of anatomy classes.
+
+    Returns:
+        Label ids with shape ``[N]``.
+    """
+    flat_points = points_norm.reshape(-1, 3)
+    # grid_sample expects xyz axis order in the last grid dimension.
+    grid_xyz = flat_points[:, [2, 1, 0]] * 2.0 - 1.0
+    grid_xyz = grid_xyz.reshape(1, -1, 1, 1, 3)
+    sampled = F.grid_sample(
+        seg_volume_labels,
+        grid_xyz,
+        mode='nearest',
+        padding_mode='zeros',
+        align_corners=True,
+    )
+    labels = sampled.squeeze(0).squeeze(0).squeeze(-1).squeeze(-1).reshape(-1)
+    return labels.round().to(torch.long).clamp(0, int(n_anatomy_classes) - 1)
+
+
+def _prepare_seg_volume_onehot(
+    seg_volume: torch.Tensor | np.ndarray | None,
+    n_anatomy_classes: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Deprecated wrapper retained for compatibility with older tests/imports."""
+    labels = _prepare_seg_volume_labels(seg_volume=seg_volume, n_anatomy_classes=n_anatomy_classes, device=device)
+    if labels is None:
+        return None
+    labels_long = labels.squeeze(0).squeeze(0).to(dtype=torch.long)
+    return F.one_hot(labels_long, num_classes=n_anatomy_classes).permute(3, 0, 1, 2).unsqueeze(0).to(
+        device=device, dtype=dtype, non_blocking=True
+    )
+
+
+def _sample_anatomy_onehot(
+    seg_volume_onehot: torch.Tensor,
+    points_norm: torch.Tensor,
+) -> torch.Tensor:
+    """Deprecated wrapper retained for compatibility with older tests/imports."""
+    n_classes = int(seg_volume_onehot.shape[1])
+    labels = _sample_anatomy_labels(
+        seg_volume_labels=_prepare_seg_volume_labels(
+            seg_volume=seg_volume_onehot, n_anatomy_classes=n_classes, device=seg_volume_onehot.device
+        ),
+        points_norm=points_norm,
+        n_anatomy_classes=n_classes,
+    )
+    return F.one_hot(labels, num_classes=n_classes).to(dtype=points_norm.dtype)
+
+
 def render_rays(
     model: nn.Module,
     ray_origins: torch.Tensor,
@@ -46,6 +186,9 @@ def render_rays(
     far: float,
     perturb: bool = True,
     chunk_size: int = 4096,
+    seg_volume: torch.Tensor | np.ndarray | None = None,
+    n_anatomy_classes: int = 0,
+    debug_capture: dict[str, Any] | None = None,
 ) -> torch.Tensor:
     """Render projection values for a batch of rays.
 
@@ -58,6 +201,8 @@ def render_rays(
         far: Far sampling distance.
         perturb: Enable stratified random perturbation.
         chunk_size: Query chunk size to prevent OOM.
+        seg_volume: Optional segmentation volume used to query anatomy labels.
+        n_anatomy_classes: Number of anatomy classes for seg-label conditioning.
 
     Returns:
         Predicted line-integral tensor with shape ``[N]``.
@@ -91,14 +236,46 @@ def render_rays(
         points_query = points_norm
 
     flat_points = points_query.reshape(-1, 3)
+    if debug_capture is not None:
+        seg_sample_points = points_query.reshape(-1, 3)
+        debug_capture['seg_sample_coords_preview'] = seg_sample_points[:5].detach().cpu()
+        debug_capture['coord_same_storage'] = (
+            seg_sample_points.untyped_storage().data_ptr() == flat_points.untyped_storage().data_ptr()
+        )
+        if seg_sample_points.numel() > 0:
+            debug_capture['coord_max_abs_diff'] = float((seg_sample_points - flat_points).abs().max().item())
+        else:
+            debug_capture['coord_max_abs_diff'] = 0.0
+    flat_anatomy_labels: torch.Tensor | None = None
+    if seg_volume is not None:
+        seg_volume_labels = _prepare_seg_volume_labels(
+            seg_volume=seg_volume,
+            n_anatomy_classes=int(n_anatomy_classes),
+            device=flat_points.device,
+        )
+        if seg_volume_labels is None:
+            raise RuntimeError('seg_volume preparation failed unexpectedly')
+        flat_anatomy_labels = _sample_anatomy_labels(
+            seg_volume_labels=seg_volume_labels,
+            points_norm=points_query,
+            n_anatomy_classes=int(n_anatomy_classes),
+        )
+        if debug_capture is not None:
+            debug_capture['anatomy_labels'] = flat_anatomy_labels
+
     pred_chunks: list[torch.Tensor] = []
     for start in range(0, flat_points.shape[0], chunk_size):
         end = min(start + chunk_size, flat_points.shape[0])
         query = flat_points[start:end]
-        if hasattr(model, 'query_density'):
-            pred = model.query_density(query)
-        else:
-            pred = model(query)
+        if debug_capture is not None and 'network_query_coords_preview' not in debug_capture:
+            debug_capture['network_query_coords_preview'] = query[:5].detach().cpu()
+        cond_chunk = flat_anatomy_labels[start:end] if flat_anatomy_labels is not None else None
+        pred = _query_model_density(
+            model,
+            query,
+            anatomy_labels=cond_chunk,
+            n_anatomy_classes=int(n_anatomy_classes),
+        )
         pred_chunks.append(pred)
 
     densities = torch.cat(pred_chunks, dim=0).reshape(ray_origins.shape[0], n_samples, 1)
@@ -118,6 +295,8 @@ def reconstruct_volume(
     voxel_size: list[float],
     chunk_size: int = 65536,
     device: torch.device = torch.device('cuda'),
+    seg_volume: torch.Tensor | np.ndarray | None = None,
+    n_anatomy_classes: int = 0,
 ) -> np.ndarray:
     """Reconstruct a dense 3D volume from an implicit density model."""
     if len(volume_size) != 3:
@@ -141,15 +320,11 @@ def reconstruct_volume(
         raise ValueError(f'volume_size_world must have length 3, got {volume_size_world}')
     batch_size = int(chunk_size)
 
-    axis_mode = str(getattr(model, 'coord_axis_mode', 'legacy')).lower()
     x = torch.linspace(-(nx - 1) / 2 * dx, (nx - 1) / 2 * dx, nx)
     y = torch.linspace(-(ny - 1) / 2 * dy, (ny - 1) / 2 * dy, ny)
     z = torch.linspace(-(nz - 1) / 2 * dz, (nz - 1) / 2 * dz, nz)
     zz, yy, xx = torch.meshgrid(z, y, x, indexing='ij')
-    if axis_mode == 'identity':
-        phys = torch.stack((zz, yy, xx), dim=-1).reshape(-1, 3)
-    else:
-        phys = torch.stack((-yy, -xx, -zz), dim=-1).reshape(-1, 3)
+    phys = torch.stack((zz, yy, xx), dim=-1).reshape(-1, 3)
     volume_size_t = torch.as_tensor(volume_size_world, dtype=phys.dtype, device=phys.device)
     if torch.any(volume_size_t <= 0):
         raise ValueError(f'volume size must be positive, got {volume_size_world}')
@@ -164,14 +339,33 @@ def reconstruct_volume(
     device = infer_device
     model.eval()
     mu_all: list[torch.Tensor] = []
+    seg_volume_labels: torch.Tensor | None = None
+    if seg_volume is not None:
+        seg_volume_labels = _prepare_seg_volume_labels(
+            seg_volume=seg_volume,
+            n_anatomy_classes=int(n_anatomy_classes),
+            device=device,
+        )
+        if seg_volume_labels is None:
+            raise RuntimeError('seg_volume preparation failed unexpectedly')
+
     with torch.no_grad():
         for start in range(0, normalized.shape[0], batch_size):
             end = min(start + batch_size, normalized.shape[0])
             chunk = normalized[start:end].to(device)
-            if hasattr(model, 'query_density'):
-                mu = model.query_density(chunk)
-            else:
-                mu = model(chunk)
+            cond_chunk: torch.Tensor | None = None
+            if seg_volume_labels is not None:
+                cond_chunk = _sample_anatomy_labels(
+                    seg_volume_labels=seg_volume_labels,
+                    points_norm=chunk,
+                    n_anatomy_classes=int(n_anatomy_classes),
+                )
+            mu = _query_model_density(
+                model,
+                chunk,
+                anatomy_labels=cond_chunk,
+                n_anatomy_classes=int(n_anatomy_classes),
+            )
             mu_all.append(mu.cpu())
 
     mu_all = torch.cat(mu_all, dim=0)

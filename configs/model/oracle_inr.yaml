@@ -1,4 +1,4 @@
-name: vanilla_inr
+name: oracle_inr
 encoder_type: hashgrid
 n_levels: 16
 n_features_per_level: 2
@@ -8,3 +8,4 @@ per_level_scale: 1.4472
 n_hidden_layers: 4
 hidden_dim: 256
 last_activation: sigmoid
+n_anatomy_classes: 10

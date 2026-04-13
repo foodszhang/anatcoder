@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from anatcoder.models.ray_utils import (
     compute_near_far_naf,
-    generate_rays_for_view,
     generate_rays_for_view_naf_tigre,
 )
 from anatcoder.utils.geometry import CBCTGeometry
@@ -37,7 +36,8 @@ class CTProjectionDataset(Dataset[dict[str, torch.Tensor]]):
         self.proj_case_dir = Path(proj_dir)
         self.n_views = int(n_views)
         self.geo = geo
-        self.use_naf_rays = bool(use_naf_rays)
+        # Backward-compatible arg; pipeline is now always NAF-TIGRE aligned.
+        _ = use_naf_rays
 
         view_dir = self.proj_case_dir / f'{self.n_views}views'
         proj_path = view_dir / 'projections.npy'
@@ -53,9 +53,7 @@ class CTProjectionDataset(Dataset[dict[str, torch.Tensor]]):
             raise FileNotFoundError(f'GT volume not found: {volume_path}')
 
         self.projections = np.asarray(load_numpy(proj_path), dtype=np.float32)
-        # Keep projections in native [K, rows, cols]. For legacy ray path we keep
-        # Fortran flattening, while NAF ray path uses C-order flattening to match
-        # official NAF detector indexing.
+        # Keep projections in native [K, rows, cols].
         self.angles = np.asarray(load_numpy(angle_path), dtype=np.float32)
         self.gt_volume = np.asarray(load_numpy(volume_path), dtype=np.float32)
         self.seg = np.asarray(load_numpy(seg_path), dtype=np.int16) if seg_path.exists() else None
@@ -70,41 +68,27 @@ class CTProjectionDataset(Dataset[dict[str, torch.Tensor]]):
             )
 
         self.n_view_loaded, self.det_rows, self.det_cols = self.projections.shape
-        self.volume_size_mm = (np.asarray(self.geo.n_voxel, dtype=np.float32) * np.asarray(self.geo.d_voxel, dtype=np.float32))
-        diag = float(np.linalg.norm(self.volume_size_mm))
-        if self.use_naf_rays:
-            self.near, self.far = compute_near_far_naf(self.geo)
-        else:
-            self.near = float(self.geo.DSO - 0.5 * diag)
-            self.far = float(self.geo.DSO + 0.5 * diag)
+        self.volume_size_mm = np.asarray(self.geo.n_voxel, dtype=np.float32) * np.asarray(
+            self.geo.d_voxel, dtype=np.float32
+        )
+        self.near, self.far = compute_near_far_naf(self.geo)
 
         # Precompute all rays once for fast __getitem__.
         ray_origins: list[np.ndarray] = []
         ray_directions: list[np.ndarray] = []
         for angle in self.angles:
-            if self.use_naf_rays:
-                origins_t, dirs_t = generate_rays_for_view_naf_tigre(
-                    self.geo,
-                    float(angle),
-                    device=torch.device('cpu'),
-                )
-            else:
-                origins_t, dirs_t = generate_rays_for_view(
-                    self.geo,
-                    float(angle),
-                    device=torch.device('cpu'),
-                )
+            origins_t, dirs_t = generate_rays_for_view_naf_tigre(
+                self.geo,
+                float(angle),
+                device=torch.device('cpu'),
+            )
             ray_origins.append(origins_t.numpy())
             ray_directions.append(dirs_t.numpy())
         self._ray_origins = np.stack(ray_origins, axis=0).reshape(-1, 3).astype(np.float32, copy=False)
         self._ray_directions = np.stack(ray_directions, axis=0).reshape(-1, 3).astype(np.float32, copy=False)
         gt_views: list[np.ndarray] = []
         for k in range(self.n_view_loaded):
-            if self.use_naf_rays:
-                # Keep GT projection values in TIGRE mm integral units.
-                gt_views.append(self.projections[k].reshape(-1))
-            else:
-                gt_views.append(self.projections[k].flatten(order='F'))
+            gt_views.append(self.projections[k].reshape(-1))
         self._gt_pixels = np.concatenate(gt_views).astype(np.float32, copy=False)
 
     def __len__(self) -> int:
@@ -171,7 +155,8 @@ class CTDataModule(pl.LightningDataModule):
         self.geo = geo
         self.batch_size = int(batch_size)
         self.num_workers = int(num_workers)
-        self.use_naf_rays = bool(use_naf_rays)
+        # Backward-compatible arg; pipeline is now always NAF-TIGRE aligned.
+        _ = use_naf_rays
         self.dataset: CTProjectionDataset | None = None
 
     def setup(self, stage: str | None = None) -> None:
@@ -182,13 +167,17 @@ class CTDataModule(pl.LightningDataModule):
             proj_dir=self.proj_dir,
             n_views=self.n_views,
             geo=self.geo,
-            use_naf_rays=self.use_naf_rays,
         )
 
     def train_dataloader(self) -> DataLoader:
         """Return shuffled ray dataloader for training."""
         if self.dataset is None:
             raise RuntimeError('DataModule.setup() must be called before train_dataloader().')
+        loader_kwargs: dict[str, Any] = {}
+        if self.num_workers > 0:
+            # Keep worker processes alive between epochs to reduce CPU/process churn.
+            loader_kwargs['persistent_workers'] = True
+            loader_kwargs['prefetch_factor'] = 4
         return DataLoader(
             self.dataset,
             batch_size=self.batch_size,
@@ -196,6 +185,7 @@ class CTDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=False,
+            **loader_kwargs,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -219,6 +209,12 @@ class CTDataModule(pl.LightningDataModule):
         if self.dataset is None:
             raise RuntimeError('DataModule.setup() must be called before get_gt_volume().')
         return self.dataset.gt_volume
+
+    def get_seg_volume(self) -> np.ndarray | None:
+        """Return segmentation volume for oracle conditioning."""
+        if self.dataset is None:
+            raise RuntimeError('DataModule.setup() must be called before get_seg_volume().')
+        return self.dataset.seg
 
     def get_geo(self) -> CBCTGeometry:
         """Return geometry object."""

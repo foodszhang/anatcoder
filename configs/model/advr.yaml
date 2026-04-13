@@ -1,10 +1,12 @@
-name: vanilla_inr
+name: advr
 encoder_type: hashgrid
 n_levels: 16
 n_features_per_level: 2
 log2_hashmap_size: 19
 base_resolution: 16
 per_level_scale: 1.4472
-n_hidden_layers: 4
+n_hidden_layers: 2
 hidden_dim: 256
+head_hidden_dim: 64
+n_anatomy_classes: 10
 last_activation: sigmoid

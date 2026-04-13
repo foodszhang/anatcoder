@@ -34,10 +34,35 @@ bash scripts/download_data.sh
 python scripts/preprocess_all.py --input_dir data/raw --output_dir data/processed --crop_size 128
 ```
 
+For TotalSegmentator v2 (10-case Week-3 setup), use:
+
+```bash
+python scripts/preprocess_totalseg.py \
+  --input_dir data/raw/totalsegmentator \
+  --output_dir data/processed \
+  --num_cases 10 \
+  --crop_size 128 \
+  --overwrite
+```
+
 3. Generate sparse projections:
 
 ```bash
-python scripts/generate_projections.py   --data_dir data/processed   --output_dir data/projections   --n_views 10 20 30 50   --geo_config configs/data/default.yaml
+python scripts/generate_projections.py \
+  --data_dir data/processed \
+  --output_dir data/projections \
+  --n_views 10 20 50 \
+  --volume_size 128
+```
+
+4. Verify processed + projection dataset:
+
+```bash
+python scripts/verify_dataset.py \
+  --processed_dir data/processed \
+  --projections_dir data/projections \
+  --required_views 10 20 50 \
+  --expected_case_count 10
 ```
 
 ## Quick Start

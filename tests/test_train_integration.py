@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 import torch
 from omegaconf import OmegaConf
 
@@ -15,9 +14,9 @@ SRC_DIR = REPO_ROOT / 'src'
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from anatcoder.data.dataset import CTDataModule
-from anatcoder.train import CTReconLitModule
-from anatcoder.utils.geometry import CBCTGeometry, generate_angles
+from anatcoder.data.dataset import CTDataModule  # noqa: E402
+from anatcoder.train import CTReconLitModule  # noqa: E402
+from anatcoder.utils.geometry import CBCTGeometry, generate_angles  # noqa: E402
 
 
 def _build_synthetic_case(root: Path) -> tuple[Path, Path]:
@@ -66,6 +65,7 @@ def _make_cfg(data_root: Path) -> OmegaConf:
     return OmegaConf.create(
         {
             'model': {
+                'name': 'vanilla_inr',
                 'encoder_type': 'positional',
                 'n_levels': 16,
                 'n_features_per_level': 2,
@@ -74,6 +74,7 @@ def _make_cfg(data_root: Path) -> OmegaConf:
                 'per_level_scale': 1.4472,
                 'n_hidden_layers': 2,
                 'hidden_dim': 64,
+                'last_activation': 'sigmoid',
             },
             'train': {
                 'max_epochs': 1,
@@ -92,7 +93,6 @@ def _make_cfg(data_root: Path) -> OmegaConf:
                 'proj_dir': str(data_root / 'projections'),
                 'case': 'case001',
                 'n_views': 10,
-                'use_naf_rays': False,
                 'volume_size': [32, 32, 32],
                 'voxel_size': [1.0, 1.0, 1.0],
                 'geo': {
@@ -225,3 +225,82 @@ def test_projection_psnr_metric_is_computable(tmp_path: Path) -> None:
 
     proj_psnr = module._compute_projection_psnr(dm)
     assert np.isfinite(proj_psnr)
+
+
+def test_oracle_forward_smoke_with_cached_seg(tmp_path: Path) -> None:
+    """Oracle mode should render rays when seg one-hot condition is provided."""
+    case_dir, proj_case_dir = _build_synthetic_case(tmp_path)
+    cfg = _make_cfg(tmp_path)
+    cfg.model.n_anatomy_classes = 2
+    geo = CBCTGeometry(
+        DSD=cfg.data.geo.DSD,
+        DSO=cfg.data.geo.DSO,
+        n_voxel=cfg.data.volume_size,
+        d_voxel=cfg.data.voxel_size,
+        n_detector=cfg.data.geo.n_detector,
+        d_detector=cfg.data.geo.d_detector,
+    )
+    dm = CTDataModule(
+        case_dir=str(case_dir),
+        proj_dir=str(proj_case_dir),
+        n_views=10,
+        geo=geo,
+        batch_size=64,
+        num_workers=0,
+    )
+    dm.setup()
+    module = CTReconLitModule(cfg)
+    module.to(torch.device('cpu'))
+    module.train()
+
+    seg_np = dm.get_seg_volume()
+    assert seg_np is not None
+    module._seg_volume_labels = torch.from_numpy(seg_np.astype(np.int64)).clamp(0, 1)
+
+    batch = next(iter(dm.train_dataloader()))
+    pred = module.forward(
+        batch['ray_origin'].to(torch.device('cpu')),
+        batch['ray_direction'].to(torch.device('cpu')),
+    )
+    assert pred.shape[0] == batch['ray_origin'].shape[0]
+    assert torch.isfinite(pred).all()
+
+
+def test_advr_forward_smoke_with_seg_labels(tmp_path: Path) -> None:
+    """ADVR config should instantiate and render rays with seg-label routing."""
+    case_dir, proj_case_dir = _build_synthetic_case(tmp_path)
+    cfg = _make_cfg(tmp_path)
+    cfg.model.name = 'advr'
+    cfg.model.n_anatomy_classes = 2
+    cfg.model.head_hidden_dim = 16
+    geo = CBCTGeometry(
+        DSD=cfg.data.geo.DSD,
+        DSO=cfg.data.geo.DSO,
+        n_voxel=cfg.data.volume_size,
+        d_voxel=cfg.data.voxel_size,
+        n_detector=cfg.data.geo.n_detector,
+        d_detector=cfg.data.geo.d_detector,
+    )
+    dm = CTDataModule(
+        case_dir=str(case_dir),
+        proj_dir=str(proj_case_dir),
+        n_views=10,
+        geo=geo,
+        batch_size=64,
+        num_workers=0,
+    )
+    dm.setup()
+    module = CTReconLitModule(cfg)
+    module.to(torch.device('cpu'))
+    module.train()
+    seg_np = dm.get_seg_volume()
+    assert seg_np is not None
+    module._seg_volume_labels = torch.from_numpy(seg_np.astype(np.int64)).clamp(0, 1)
+
+    batch = next(iter(dm.train_dataloader()))
+    pred = module.forward(
+        batch['ray_origin'].to(torch.device('cpu')),
+        batch['ray_direction'].to(torch.device('cpu')),
+    )
+    assert pred.shape[0] == batch['ray_origin'].shape[0]
+    assert torch.isfinite(pred).all()

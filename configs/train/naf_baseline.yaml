@@ -12,3 +12,8 @@ chunk_size: 409600
 recon_chunk_size: 65536
 num_workers: 4
 precision: 32-true
+lambda_atv: 0.01
+atv_n_pairs: 4096
+atv_alpha: 0.05
+atv_every_n_steps: 4
+debug_verify_advr: false
